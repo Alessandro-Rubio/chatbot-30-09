@@ -88,9 +88,9 @@ app = FastAPI(
 # CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000"],  # Your React frontend
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["*"],  # Allows all methods, including DELETE
     allow_headers=["*"],
 )
 
@@ -188,6 +188,10 @@ async def upload_file(file: UploadFile = File(...), background_tasks: Background
 @app.delete("/files/{filename}")
 async def delete_file(filename: str, background_tasks: BackgroundTasks = None):
     try:
+        # Security: Validate filename to prevent path traversal
+        if '/' in filename or '\\' in filename:
+            raise HTTPException(status_code=400, detail="Nombre de archivo inválido")
+        
         success = file_manager.delete_file(filename)
         if not success:
             raise HTTPException(status_code=404, detail="Archivo no encontrado")
@@ -196,8 +200,11 @@ async def delete_file(filename: str, background_tasks: BackgroundTasks = None):
         background_tasks.add_task(initialize_rag_system)
         
         return {"message": f"Archivo {filename} eliminado exitosamente. Sistema RAG se está actualizando."}
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"❌ Error deleting file {filename}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
 @app.get("/files")
 async def list_files():
@@ -213,7 +220,7 @@ async def list_files():
 
 @app.get("/rag/status")
 async def rag_status():
-    """RAG status endpoint"""
+    """RAG status endpoint that frontend expects"""
     return {
         "rag_initialized": rag_initialized,
         "file_count": file_manager.get_file_count()
@@ -221,13 +228,13 @@ async def rag_status():
 
 @app.post("/rag/reinitialize")
 async def reinitialize_rag(background_tasks: BackgroundTasks = None):
-    """Reinitialize RAG endpoint"""
+    """Reinitialize RAG endpoint that frontend expects"""
     background_tasks.add_task(initialize_rag_system)
     return {"message": "Reinicialización del sistema RAG iniciada"}
 
 @app.post("/initialize-rag")
 async def initialize_rag_legacy(background_tasks: BackgroundTasks = None):
-    """Legacy initialize endpoint"""
+    """Legacy initialize endpoint for frontend compatibility"""
     background_tasks.add_task(initialize_rag_system)
     return {"message": "Inicialización del sistema RAG iniciada"}
 
