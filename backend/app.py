@@ -9,7 +9,7 @@ from file_manager import EnhancedFileManager
 from document_processor import AdvancedDocumentProcessor
 from rag_engine import HybridRAGEngine
 
-app = FastAPI(title="Advanced RAG Chatbot", version="4.0.0")
+app = FastAPI(title="Chatbot RAG Inteligente", version="5.0.0")
 
 # CORS configuration
 app.add_middleware(
@@ -31,12 +31,13 @@ rag_initialized = False
 # Models
 class ChatRequest(BaseModel):
     message: str
-    use_rag: bool = True
+    use_rag: Optional[bool] = None  # None = automático, True = forzar RAG, False = forzar simple
 
 class ChatResponse(BaseModel):
     reply: str
     used_rag: bool
     source: str
+    mode: str  # 'auto', 'forced_rag', 'forced_simple'
 
 class FileUploadResponse(BaseModel):
     status: str
@@ -48,25 +49,24 @@ class SystemStatusResponse(BaseModel):
     total_files: int
     system_status: str
 
-class RAGStatusResponse(BaseModel):
-    rag_initialized: bool
-    file_count: int
-
 async def initialize_rag_system():
     """Initialize RAG system on startup"""
     global rag_initialized
     try:
-        print("🔄 Initializing RAG system...")
+        print("🔄 Inicializando sistema RAG...")
         documents = doc_processor.load_and_chunk_documents()
         if documents:
             rag_engine.initialize_vector_store(documents)
-            rag_initialized = True
-            print("✅ RAG system initialized successfully")
+            rag_initialized = rag_engine.is_rag_initialized()
+            if rag_initialized:
+                print("✅ Sistema RAG inicializado correctamente")
+            else:
+                print("⚠️ Sistema RAG no se pudo inicializar")
         else:
-            print("⚠️ No documents found for RAG initialization")
+            print("ℹ️ No hay documentos para inicializar RAG")
             rag_initialized = False
     except Exception as e:
-        print(f"❌ RAG initialization failed: {str(e)}")
+        print(f"❌ Error inicializando RAG: {str(e)}")
         rag_initialized = False
 
 @app.on_event("startup")
@@ -77,20 +77,71 @@ async def startup_event():
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     try:
-        if request.use_rag and rag_initialized:
-            response = rag_engine.query_with_rag(request.message)
-            return ChatResponse(reply=response, used_rag=True, source="rag")
+        # Lógica de decisión automática
+        if request.use_rag is None:
+            # Modo automático - el sistema decide
+            if rag_initialized:
+                response = rag_engine.query_with_rag(request.message)
+                # Determinar si se usó RAG basado en la respuesta
+                used_rag = rag_engine._should_use_rag(request.message)[0]
+                return ChatResponse(
+                    reply=response, 
+                    used_rag=used_rag, 
+                    source="rag" if used_rag else "simple",
+                    mode="auto"
+                )
+            else:
+                # No hay RAG disponible, usar modo simple
+                response = rag_engine._generate_simple_response(request.message)
+                return ChatResponse(
+                    reply=response, 
+                    used_rag=False, 
+                    source="simple",
+                    mode="auto"
+                )
+        
+        elif request.use_rag:
+            # Modo RAG forzado
+            if rag_initialized:
+                response = rag_engine.query_with_rag(request.message)
+                return ChatResponse(
+                    reply=response, 
+                    used_rag=True, 
+                    source="rag",
+                    mode="forced_rag"
+                )
+            else:
+                response = "El sistema RAG no está disponible. No hay documentos cargados o el sistema no se ha inicializado correctamente."
+                return ChatResponse(
+                    reply=response, 
+                    used_rag=False, 
+                    source="error",
+                    mode="forced_rag"
+                )
+        
         else:
-            # Simple mode - implement your simple response logic here
-            simple_response = "Modo simple activado. Para usar RAG, asegúrate de tener documentos cargados."
-            return ChatResponse(reply=simple_response, used_rag=False, source="simple")
+            # Modo simple forzado
+            response = rag_engine._generate_simple_response(request.message)
+            return ChatResponse(
+                reply=response, 
+                used_rag=False, 
+                source="simple",
+                mode="forced_simple"
+            )
+            
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        error_response = f"Lo siento, ocurrió un error: {str(e)}"
+        return ChatResponse(
+            reply=error_response, 
+            used_rag=False, 
+            source="error",
+            mode="error"
+        )
 
 @app.post("/upload", response_model=FileUploadResponse)
 async def upload_file(file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
     try:
-        # Validate file type
+        # Validar tipo de archivo
         allowed_types = ['.pdf', '.txt', '.docx', '.doc']
         file_ext = os.path.splitext(file.filename)[1].lower()
         
@@ -146,11 +197,9 @@ async def list_files():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ✅ ADD THESE MISSING ENDPOINTS THAT YOUR FRONTEND EXPECTS
-
 @app.get("/rag/status")
 async def rag_status():
-    """RAG status endpoint that frontend expects"""
+    """RAG status endpoint"""
     return {
         "rag_initialized": rag_initialized,
         "file_count": file_manager.get_file_count()
@@ -158,13 +207,13 @@ async def rag_status():
 
 @app.post("/rag/reinitialize")
 async def reinitialize_rag(background_tasks: BackgroundTasks = None):
-    """Reinitialize RAG endpoint that frontend expects"""
+    """Reinitialize RAG endpoint"""
     background_tasks.add_task(initialize_rag_system)
     return {"message": "Reinicialización del sistema RAG iniciada"}
 
 @app.post("/initialize-rag")
 async def initialize_rag_legacy(background_tasks: BackgroundTasks = None):
-    """Legacy initialize endpoint for frontend compatibility"""
+    """Legacy initialize endpoint"""
     background_tasks.add_task(initialize_rag_system)
     return {"message": "Inicialización del sistema RAG iniciada"}
 
@@ -177,19 +226,18 @@ async def system_status():
         system_status="healthy" if rag_initialized else "initializing"
     )
 
-@app.post("/system/reinitialize")
-async def reinitialize_system(background_tasks: BackgroundTasks = None):
-    """Force reinitialize the entire RAG system"""
-    background_tasks.add_task(initialize_rag_system)
-    return {"message": "Reinicialización del sistema RAG iniciada"}
-
 @app.get("/")
 async def root():
     return {
-        "message": "Sistema RAG Híbrido API",
+        "message": "Sistema RAG Inteligente API - Modo Automático",
         "status": "operational",
         "rag_initialized": rag_initialized,
-        "file_count": file_manager.get_file_count()
+        "file_count": file_manager.get_file_count(),
+        "modes": {
+            "auto": "El sistema decide cuándo usar RAG",
+            "forced_rag": "Forzar uso de documentos",
+            "forced_simple": "Forzar modo conversacional"
+        }
     }
 
 if __name__ == "__main__":

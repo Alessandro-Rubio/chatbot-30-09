@@ -111,7 +111,7 @@ const FileManagement = () => {
           />
           {uploading && <div className="uploading">Subiendo...</div>}
         </div>
-        <small>Formatos soportados: PDF, TXT, DOCX, DOC</small>
+        <small>Formatos soportados: PDF</small>
       </div>
 
       <div className="file-list-section">
