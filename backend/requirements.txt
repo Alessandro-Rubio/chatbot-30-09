@@ -9,3 +9,7 @@ llama-index-core
 llama-index-embeddings-ollama
 llama-index-llms-ollama
 pypdf
+python-multipart
+langchain-cli
+rank_bm25
+unstructured

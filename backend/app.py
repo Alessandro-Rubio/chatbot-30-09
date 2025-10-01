@@ -2,12 +2,12 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
+import os
 import asyncio
 
 from file_manager import EnhancedFileManager
 from document_processor import AdvancedDocumentProcessor
 from rag_engine import HybridRAGEngine
-from auto_rag import AutoRAGManager  # NEW
 
 app = FastAPI(title="Advanced RAG Chatbot", version="4.0.0")
 
@@ -22,7 +22,11 @@ app.add_middleware(
 
 # Initialize components
 file_manager = EnhancedFileManager()
-rag_manager = AutoRAGManager()  # NEW: Use the auto-manager
+doc_processor = AdvancedDocumentProcessor()
+rag_engine = HybridRAGEngine()
+
+# Global state
+rag_initialized = False
 
 # Models
 class ChatRequest(BaseModel):
@@ -42,24 +46,43 @@ class FileUploadResponse(BaseModel):
 class SystemStatusResponse(BaseModel):
     rag_initialized: bool
     total_files: int
-    unprocessed_files: int
     system_status: str
+
+class RAGStatusResponse(BaseModel):
+    rag_initialized: bool
+    file_count: int
+
+async def initialize_rag_system():
+    """Initialize RAG system on startup"""
+    global rag_initialized
+    try:
+        print("🔄 Initializing RAG system...")
+        documents = doc_processor.load_and_chunk_documents()
+        if documents:
+            rag_engine.initialize_vector_store(documents)
+            rag_initialized = True
+            print("✅ RAG system initialized successfully")
+        else:
+            print("⚠️ No documents found for RAG initialization")
+            rag_initialized = False
+    except Exception as e:
+        print(f"❌ RAG initialization failed: {str(e)}")
+        rag_initialized = False
 
 @app.on_event("startup")
 async def startup_event():
     """Auto-initialize RAG system on startup"""
-    background_tasks = BackgroundTasks()
-    background_tasks.add_task(rag_manager.initialize_rag_system)
+    await initialize_rag_system()
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     try:
-        if request.use_rag and rag_manager.initialized:
-            response = rag_manager.rag_engine.query_with_rag(request.message)
+        if request.use_rag and rag_initialized:
+            response = rag_engine.query_with_rag(request.message)
             return ChatResponse(reply=response, used_rag=True, source="rag")
         else:
-            # Simple mode implementation
-            simple_response = f"Modo simple: {request.message}"
+            # Simple mode - implement your simple response logic here
+            simple_response = "Modo simple activado. Para usar RAG, asegúrate de tener documentos cargados."
             return ChatResponse(reply=simple_response, used_rag=False, source="simple")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -85,13 +108,13 @@ async def upload_file(file: UploadFile = File(...), background_tasks: Background
                 message="El archivo ya existe en el sistema"
             )
         
-        # Trigger RAG update
-        background_tasks.add_task(rag_manager.handle_file_operation, "upload", file.filename)
+        # Reinitialize RAG with new files
+        background_tasks.add_task(initialize_rag_system)
         
         return FileUploadResponse(
             status="success",
             filename=file.filename,
-            message="Archivo subido y RAG system se está actualizando"
+            message="Archivo subido exitosamente. Sistema RAG se está actualizando."
         )
         
     except Exception as e:
@@ -104,10 +127,10 @@ async def delete_file(filename: str, background_tasks: BackgroundTasks = None):
         if not success:
             raise HTTPException(status_code=404, detail="Archivo no encontrado")
         
-        # Trigger RAG rebuild
-        background_tasks.add_task(rag_manager.handle_file_operation, "delete", filename)
+        # Reinitialize RAG after deletion
+        background_tasks.add_task(initialize_rag_system)
         
-        return {"message": f"Archivo {filename} eliminado. RAG system se está actualizando."}
+        return {"message": f"Archivo {filename} eliminado exitosamente. Sistema RAG se está actualizando."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -118,28 +141,56 @@ async def list_files():
         files = file_manager.list_files()
         return {
             "files": files,
-            "total_count": file_manager.get_file_count(),
-            "metadata": file_manager.metadata
+            "total_count": file_manager.get_file_count()
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# ✅ ADD THESE MISSING ENDPOINTS THAT YOUR FRONTEND EXPECTS
+
+@app.get("/rag/status")
+async def rag_status():
+    """RAG status endpoint that frontend expects"""
+    return {
+        "rag_initialized": rag_initialized,
+        "file_count": file_manager.get_file_count()
+    }
+
+@app.post("/rag/reinitialize")
+async def reinitialize_rag(background_tasks: BackgroundTasks = None):
+    """Reinitialize RAG endpoint that frontend expects"""
+    background_tasks.add_task(initialize_rag_system)
+    return {"message": "Reinicialización del sistema RAG iniciada"}
+
+@app.post("/initialize-rag")
+async def initialize_rag_legacy(background_tasks: BackgroundTasks = None):
+    """Legacy initialize endpoint for frontend compatibility"""
+    background_tasks.add_task(initialize_rag_system)
+    return {"message": "Inicialización del sistema RAG iniciada"}
+
 @app.get("/system/status", response_model=SystemStatusResponse)
 async def system_status():
     """Get comprehensive system status"""
-    status = rag_manager.get_system_status()
     return SystemStatusResponse(
-        rag_initialized=status["rag_initialized"],
-        total_files=status["total_files"],
-        unprocessed_files=status["unprocessed_files"],
-        system_status="healthy" if status["rag_initialized"] else "initializing"
+        rag_initialized=rag_initialized,
+        total_files=file_manager.get_file_count(),
+        system_status="healthy" if rag_initialized else "initializing"
     )
 
 @app.post("/system/reinitialize")
 async def reinitialize_system(background_tasks: BackgroundTasks = None):
     """Force reinitialize the entire RAG system"""
-    background_tasks.add_task(rag_manager.initialize_rag_system)
+    background_tasks.add_task(initialize_rag_system)
     return {"message": "Reinicialización del sistema RAG iniciada"}
+
+@app.get("/")
+async def root():
+    return {
+        "message": "Sistema RAG Híbrido API",
+        "status": "operational",
+        "rag_initialized": rag_initialized,
+        "file_count": file_manager.get_file_count()
+    }
 
 if __name__ == "__main__":
     import uvicorn
