@@ -1,6 +1,6 @@
 from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import OllamaEmbeddings
-from langchain_community.llms import Ollama
+from langchain_ollama import OllamaEmbeddings
+from langchain_ollama import OllamaLLM
 from langchain_community.retrievers import BM25Retriever
 from langchain.retrievers import EnsembleRetriever
 from langchain.schema import Document
@@ -10,140 +10,154 @@ from typing import List, Dict, Tuple
 class HybridRAGEngine:
     def __init__(self, persistence_path: str = "./vector_store"):
         self.embedding_function = OllamaEmbeddings(model="nomic-embed-text")
-        self.llm = Ollama(model="llama3.1", temperature=0.1)
+        
+        # ✅ MODELOS QUANTIZADOS - ELIGE UNO:
+        # Opción 1: Máximo rendimiento (recomendado)
+        self.llm = OllamaLLM(
+            model="llama3.1:8b-instruct-q4_K_M", 
+            temperature=0.1,
+            num_ctx=4096,  # Contexto reducido para mayor velocidad
+            num_thread=8,  # Optimizar uso de CPU
+            num_gpu=1      # Usar GPU si está disponible
+        )
+        
         self.persistence_path = persistence_path
         self.vector_store = None
         self.bm25_retriever = None
         self.ensemble_retriever = None
         
     def initialize_vector_store(self, documents: List[Document]):
-        """Inicializar sistema RAG con documentos"""
+        """Inicializar sistema RAG con documentos - Versión optimizada"""
         if not documents:
-            print("No hay documentos para procesar")
+            print("⚠️ No hay documentos para RAG. El sistema funcionará en modo simple.")
             self.vector_store = None
             self.bm25_retriever = None
             return
         
-        # Inicializar vector store
-        self.vector_store = Chroma.from_documents(
-            documents=documents,
-            embedding=self.embedding_function,
-            persist_directory=self.persistence_path
-        )
-        
-        # Inicializar BM25 retriever
-        self.bm25_retriever = BM25Retriever.from_documents(documents)
-        self.bm25_retriever.k = 2
-        
-        # Crear ensemble retriever
-        vector_retriever = self.vector_store.as_retriever(
-            search_kwargs={"k": 3}
-        )
-        
-        self.ensemble_retriever = EnsembleRetriever(
-            retrievers=[vector_retriever, self.bm25_retriever],
-            weights=[0.7, 0.3]
-        )
-        
-        print("Sistema RAG híbrido inicializado correctamente")
-    
+        try:
+            # Inicializar vector store con timeout reducido
+            self.vector_store = Chroma.from_documents(
+                documents=documents,
+                embedding=self.embedding_function,
+                persist_directory=self.persistence_path
+            )
+            
+            # Inicializar BM25 retriever solo si hay documentos suficientes
+            if len(documents) > 5:
+                self.bm25_retriever = BM25Retriever.from_documents(documents)
+                self.bm25_retriever.k = 2
+                
+                # Crear ensemble retriever
+                vector_retriever = self.vector_store.as_retriever(
+                    search_kwargs={"k": 2}  # Reducir documentos recuperados
+                )
+                
+                self.ensemble_retriever = EnsembleRetriever(
+                    retrievers=[vector_retriever, self.bm25_retriever],
+                    weights=[0.7, 0.3]
+                )
+            else:
+                # Para pocos documentos, usar solo vector store
+                self.ensemble_retriever = self.vector_store.as_retriever(
+                    search_kwargs={"k": 2}
+                )
+            
+            print("✅ Sistema RAG híbrido inicializado correctamente")
+            
+        except Exception as e:
+            print(f"❌ Error inicializando RAG: {str(e)}")
+            print("🔄 El sistema funcionará en modo simple sin RAG")
+            self.vector_store = None
+
     def _should_use_rag(self, question: str) -> Tuple[bool, List[Document]]:
-        """Determina si la pregunta debe usar RAG basado en relevancia"""
+        """Determina si la pregunta debe usar RAG - Versión optimizada"""
         if not self.ensemble_retriever:
             return False, []
         
         try:
-            # Recuperar documentos relevantes
-            retrieved_docs = self.ensemble_retriever.get_relevant_documents(question)
+            # Análisis rápido de la pregunta
+            question_lower = question.lower().strip()
             
-            if not retrieved_docs:
+            # Preguntas generales que NO necesitan RAG
+            general_questions = {
+                'hola', 'hello', 'hi', 'hey', 'buenos días', 'buenas tardes', 'buenas noches',
+                'cómo estás', 'qué tal', 'quién eres', 'cuál es tu nombre', 
+                'qué puedes hacer', 'ayuda', 'help', 'gracias', 'thanks', 'bye', 
+                'adiós', 'hasta luego', 'ok', 'okay', 'entendido', 'de acuerdo'
+            }
+            
+            # Si es pregunta general, evitar RAG completamente
+            if question_lower in general_questions:
                 return False, []
             
-            # Analizar la pregunta para decidir si necesita documentos
-            question_lower = question.lower()
-            
-            # Palabras clave que indican necesidad de documentos específicos
-            document_keywords = [
+            # Palabras clave que SÍ necesitan RAG
+            document_keywords = {
                 'documento', 'archivo', 'pdf', 'texto', 'informe', 'reporte',
                 'según', 'según el documento', 'en el archivo', 'en el pdf',
                 'procedimiento', 'política', 'protocolo', 'guía', 'manual',
-                'especificación', 'requisito', 'norma'
-            ]
+                'especificación', 'requisito', 'norma', 'cláusula', 'artículo',
+                'contrato', 'acuerdo', 'documentación'
+            }
             
-            # Preguntas generales que NO necesitan documentos
-            general_questions = [
-                'hola', 'hello', 'hi', 'cómo estás', 'qué tal', 'quién eres',
-                'cuál es tu nombre', 'qué puedes hacer', 'ayuda',
-                'gracias', 'thanks', 'bye', 'adiós', 'hasta luego'
-            ]
-            
-            # Verificar si es una pregunta general
-            if any(keyword in question_lower for keyword in general_questions):
-                return False, []
-            
-            # Verificar si la pregunta menciona explícitamente documentos
+            # Verificar palabras clave rápidamente
             if any(keyword in question_lower for keyword in document_keywords):
-                return True, retrieved_docs
+                retrieved_docs = self.ensemble_retriever.get_relevant_documents(question)
+                return len(retrieved_docs) > 0, retrieved_docs
             
-            # Si hay documentos muy relevantes (basado en similitud), usar RAG
-            # Podemos ajustar este threshold según necesidad
-            if len(retrieved_docs) >= 1:  # Si hay al menos un documento relevante
-                return True, retrieved_docs
-            else:
-                return False, []
-                
+            # Para otras preguntas, búsqueda rápida
+            retrieved_docs = self.ensemble_retriever.get_relevant_documents(question)
+            return len(retrieved_docs) >= 1, retrieved_docs
+            
         except Exception as e:
-            print(f"Error en detección RAG: {str(e)}")
+            print(f"⚠️ Error en detección RAG: {str(e)}")
             return False, []
     
-    def query_with_rag(self, question: str, top_k: int = 3) -> str:
-        """Consulta usando RAG híbrido"""
+    def query_with_rag(self, question: str, top_k: int = 2) -> str:
+        """Consulta RAG optimizada para velocidad"""
         should_use_rag, relevant_docs = self._should_use_rag(question)
         
         if not should_use_rag:
-            # Modo simple - responder pregunta general
-            return self._generate_simple_response(question)
+            # Respuesta rápida directa
+            return self._generate_fast_response(question)
         
         try:
-            # Construir contexto con documentos relevantes
+            # Contexto optimizado (solo 2 documentos máximo)
             context = "\n\n".join([
-                f"Documento: {doc.metadata.get('source_file', 'Desconocido')}\n"
-                f"Contenido: {doc.page_content}"
-                for doc in relevant_docs[:top_k]  # Usar solo los top_k más relevantes
+                f"Fuente: {doc.metadata.get('source_file', 'Documento')}\n"
+                f"Contenido: {doc.page_content[:500]}"  # Limitar longitud
+                for doc in relevant_docs[:top_k]
             ])
             
-            # Prompt mejorado para RAG
-            prompt = f"""Basándote en el siguiente contexto de documentos, responde la pregunta de manera precisa y útil.
+            # Prompt optimizado para respuestas rápidas
+            prompt = f"""Responde brevemente basándote en este contexto:
 
-Contexto:
 {context}
 
 Pregunta: {question}
 
-Instrucciones:
-1. Responde principalmente con la información proporcionada en el contexto
-2. Si el contexto no contiene información suficiente, complementa con tu conocimiento general pero indica la diferencia
-3. Sé conciso pero completo
-4. Si es relevante, menciona de qué documento proviene la información principal
-
-Respuesta:"""
+Respuesta concisa:"""
             
             response = self.llm.invoke(prompt)
             return response
             
         except Exception as e:
-            return f"Error en la consulta RAG: {str(e)}"
+            # Fallback a respuesta simple
+            return self._generate_fast_response(question)
     
-    def _generate_simple_response(self, question: str) -> str:
-        """Generar respuesta para preguntas generales"""
-        prompt = f"""Eres un asistente útil y amigable. Responde la siguiente pregunta de manera natural y conversacional.
+    def _generate_fast_response(self, question: str) -> str:
+        """Generar respuesta rápida para preguntas generales"""
+        # Prompt optimizado para velocidad
+        prompt = f"""Responde de forma breve y directa:
 
 Pregunta: {question}
 
-Responde de forma amigable y útil, como en una conversación normal:"""
+Respuesta:"""
         
-        return self.llm.invoke(prompt)
-    
+        try:
+            return self.llm.invoke(prompt)
+        except Exception as e:
+            return f"Lo siento, ocurrió un error. Por favor intenta nuevamente."
+
     def is_rag_initialized(self) -> bool:
         """Verificar si el sistema RAG está listo"""
         return self.ensemble_retriever is not None
@@ -151,11 +165,15 @@ Responde de forma amigable y útil, como en una conversación normal:"""
     def get_rag_stats(self) -> Dict:
         """Obtener estadísticas del sistema RAG"""
         if not self.vector_store:
-            return {"status": "no_initialized"}
+            return {"status": "no_initialized", "mode": "simple"}
         
-        collection = self.vector_store._collection
-        return {
-            "status": "initialized",
-            "document_count": collection.count() if collection else 0,
-            "vector_store_path": self.persistence_path
-        }
+        try:
+            collection = self.vector_store._collection
+            return {
+                "status": "initialized",
+                "document_count": collection.count() if collection else 0,
+                "vector_store_path": self.persistence_path,
+                "mode": "hybrid"
+            }
+        except:
+            return {"status": "no_initialized", "mode": "simple"}

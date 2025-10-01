@@ -1,15 +1,89 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 import os
 import asyncio
+import time
 
 from file_manager import EnhancedFileManager
 from document_processor import AdvancedDocumentProcessor
 from rag_engine import HybridRAGEngine
 
-app = FastAPI(title="Chatbot RAG Inteligente", version="5.0.0")
+# Global state
+rag_initialized = False
+startup_time = time.time()
+
+# Models - DEBEN DEFINIRSE ANTES de los endpoints
+class ChatRequest(BaseModel):
+    message: str
+    use_rag: Optional[bool] = None  # None = automático
+
+class ChatResponse(BaseModel):
+    reply: str
+    used_rag: bool
+    source: str
+    mode: str
+    response_time: float
+
+class FileUploadResponse(BaseModel):  # ✅ FALTABA ESTE MODELO
+    status: str
+    filename: str
+    message: str
+
+class SystemStatusResponse(BaseModel):
+    rag_initialized: bool
+    total_files: int
+    system_status: str
+    mode: str
+    model: str
+
+async def initialize_rag_system():
+    """Initialize RAG system on startup - Versión optimizada"""
+    global rag_initialized
+    try:
+        print("🚀 Inicializando sistema RAG optimizado...")
+        documents = doc_processor.load_and_chunk_documents()
+        
+        if documents:
+            rag_engine.initialize_vector_store(documents)
+            rag_initialized = rag_engine.is_rag_initialized()
+            
+            if rag_initialized:
+                print(f"✅ RAG inicializado con {len(documents)} documentos")
+            else:
+                print("⚠️ RAG no inicializado, modo simple activado")
+        else:
+            print("🔶 Modo simple: No hay documentos para RAG")
+            rag_initialized = False
+            
+    except Exception as e:
+        print(f"❌ Error en inicialización: {str(e)}")
+        print("🔄 Continuando en modo simple...")
+        rag_initialized = False
+
+# ✅ REEMPLAZAR EL EVENTO OBSOLETO CON LIFESPAN
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager para reemplazar @app.on_event"""
+    # Startup
+    await initialize_rag_system()
+    yield
+    # Shutdown (puedes añadir lógica de limpieza aquí si es necesario)
+    print("🔴 Apagando servidor...")
+
+# Inicializar componentes DESPUÉS de los modelos
+file_manager = EnhancedFileManager()
+doc_processor = AdvancedDocumentProcessor()
+rag_engine = HybridRAGEngine()
+
+# ✅ USAR LIFESPAN EN LUGAR DE on_event
+app = FastAPI(
+    title="Chatbot RAG Optimizado", 
+    version="6.0.0",
+    lifespan=lifespan  # Esto reemplaza @app.on_event("startup")
+)
 
 # CORS configuration
 app.add_middleware(
@@ -20,122 +94,62 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize components
-file_manager = EnhancedFileManager()
-doc_processor = AdvancedDocumentProcessor()
-rag_engine = HybridRAGEngine()
-
-# Global state
-rag_initialized = False
-
-# Models
-class ChatRequest(BaseModel):
-    message: str
-    use_rag: Optional[bool] = None  # None = automático, True = forzar RAG, False = forzar simple
-
-class ChatResponse(BaseModel):
-    reply: str
-    used_rag: bool
-    source: str
-    mode: str  # 'auto', 'forced_rag', 'forced_simple'
-
-class FileUploadResponse(BaseModel):
-    status: str
-    filename: str
-    message: str
-
-class SystemStatusResponse(BaseModel):
-    rag_initialized: bool
-    total_files: int
-    system_status: str
-
-async def initialize_rag_system():
-    """Initialize RAG system on startup"""
-    global rag_initialized
-    try:
-        print("🔄 Inicializando sistema RAG...")
-        documents = doc_processor.load_and_chunk_documents()
-        if documents:
-            rag_engine.initialize_vector_store(documents)
-            rag_initialized = rag_engine.is_rag_initialized()
-            if rag_initialized:
-                print("✅ Sistema RAG inicializado correctamente")
-            else:
-                print("⚠️ Sistema RAG no se pudo inicializar")
-        else:
-            print("ℹ️ No hay documentos para inicializar RAG")
-            rag_initialized = False
-    except Exception as e:
-        print(f"❌ Error inicializando RAG: {str(e)}")
-        rag_initialized = False
-
-@app.on_event("startup")
-async def startup_event():
-    """Auto-initialize RAG system on startup"""
-    await initialize_rag_system()
-
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
+    start_time = time.time()
+    
     try:
-        # Lógica de decisión automática
+        # Lógica optimizada de decisión
         if request.use_rag is None:
-            # Modo automático - el sistema decide
+            # Modo automático inteligente
             if rag_initialized:
                 response = rag_engine.query_with_rag(request.message)
-                # Determinar si se usó RAG basado en la respuesta
                 used_rag = rag_engine._should_use_rag(request.message)[0]
-                return ChatResponse(
-                    reply=response, 
-                    used_rag=used_rag, 
-                    source="rag" if used_rag else "simple",
-                    mode="auto"
-                )
+                mode = "auto_rag" if used_rag else "auto_simple"
             else:
-                # No hay RAG disponible, usar modo simple
-                response = rag_engine._generate_simple_response(request.message)
-                return ChatResponse(
-                    reply=response, 
-                    used_rag=False, 
-                    source="simple",
-                    mode="auto"
-                )
+                # Fallback a modo simple si RAG no está disponible
+                response = rag_engine._generate_fast_response(request.message)
+                used_rag = False
+                mode = "simple_fallback"
         
-        elif request.use_rag:
-            # Modo RAG forzado
-            if rag_initialized:
-                response = rag_engine.query_with_rag(request.message)
-                return ChatResponse(
-                    reply=response, 
-                    used_rag=True, 
-                    source="rag",
-                    mode="forced_rag"
-                )
-            else:
-                response = "El sistema RAG no está disponible. No hay documentos cargados o el sistema no se ha inicializado correctamente."
-                return ChatResponse(
-                    reply=response, 
-                    used_rag=False, 
-                    source="error",
-                    mode="forced_rag"
-                )
+        elif request.use_rag and rag_initialized:
+            # RAG forzado (solo si está disponible)
+            response = rag_engine.query_with_rag(request.message)
+            used_rag = True
+            mode = "forced_rag"
+        
+        elif request.use_rag and not rag_initialized:
+            # RAG solicitado pero no disponible
+            response = "⚠️ El sistema RAG no está disponible actualmente. Respondiendo en modo simple.\n\n"
+            response += rag_engine._generate_fast_response(request.message)
+            used_rag = False
+            mode = "fallback"
         
         else:
             # Modo simple forzado
-            response = rag_engine._generate_simple_response(request.message)
-            return ChatResponse(
-                reply=response, 
-                used_rag=False, 
-                source="simple",
-                mode="forced_simple"
-            )
-            
-    except Exception as e:
-        error_response = f"Lo siento, ocurrió un error: {str(e)}"
+            response = rag_engine._generate_fast_response(request.message)
+            used_rag = False
+            mode = "forced_simple"
+        
+        response_time = time.time() - start_time
+        
         return ChatResponse(
-            reply=error_response, 
-            used_rag=False, 
+            reply=response,
+            used_rag=used_rag,
+            source="rag" if used_rag else "simple",
+            mode=mode,
+            response_time=round(response_time, 2)
+        )
+        
+    except Exception as e:
+        response_time = time.time() - start_time
+        error_msg = f"⚠️ Error: {str(e)}"
+        return ChatResponse(
+            reply=error_msg,
+            used_rag=False,
             source="error",
-            mode="error"
+            mode="error",
+            response_time=round(response_time, 2)
         )
 
 @app.post("/upload", response_model=FileUploadResponse)
@@ -159,13 +173,13 @@ async def upload_file(file: UploadFile = File(...), background_tasks: Background
                 message="El archivo ya existe en el sistema"
             )
         
-        # Reinitialize RAG with new files
+        # Reinitialize RAG con new files
         background_tasks.add_task(initialize_rag_system)
         
         return FileUploadResponse(
             status="success",
             filename=file.filename,
-            message="Archivo subido exitosamente. Sistema RAG se está actualizando."
+            message="Archivo subido. Sistema RAG se está actualizando."
         )
         
     except Exception as e:
@@ -220,24 +234,25 @@ async def initialize_rag_legacy(background_tasks: BackgroundTasks = None):
 @app.get("/system/status", response_model=SystemStatusResponse)
 async def system_status():
     """Get comprehensive system status"""
+    rag_stats = rag_engine.get_rag_stats()
+    
     return SystemStatusResponse(
         rag_initialized=rag_initialized,
         total_files=file_manager.get_file_count(),
-        system_status="healthy" if rag_initialized else "initializing"
+        system_status="healthy" if rag_initialized else "simple_mode",
+        mode=rag_stats.get("mode", "simple"),
+        model="llama3.1:8b-instruct-q4_K_M"
     )
 
 @app.get("/")
 async def root():
     return {
-        "message": "Sistema RAG Inteligente API - Modo Automático",
+        "message": "🚀 Chatbot RAG Optimizado - Modo Quantizado",
         "status": "operational",
         "rag_initialized": rag_initialized,
         "file_count": file_manager.get_file_count(),
-        "modes": {
-            "auto": "El sistema decide cuándo usar RAG",
-            "forced_rag": "Forzar uso de documentos",
-            "forced_simple": "Forzar modo conversacional"
-        }
+        "model": "llama3.1:8b-instruct-q4_K_M",
+        "optimizations": ["quantized_model", "fast_fallback", "auto_rag_detection"]
     }
 
 if __name__ == "__main__":

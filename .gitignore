@@ -4,4 +4,3 @@ backend/.env
 backend/data/
 backend/vector_store/
 backend/__pycache__/
-backend/__pycache__/app.cpython-311.pyc
