@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import os
 import asyncio
 import time
@@ -19,6 +19,7 @@ startup_time = time.time()
 class ChatRequest(BaseModel):
     message: str
     use_rag: Optional[bool] = None  # None = automático
+    metadata_filters: Optional[Dict[str, Any]] = None
 
 class ChatResponse(BaseModel):
     reply: str
@@ -26,8 +27,9 @@ class ChatResponse(BaseModel):
     source: str
     mode: str
     response_time: float
+    intent_info: Optional[Dict] = None
 
-class FileUploadResponse(BaseModel):  # ✅ FALTABA ESTE MODELO
+class FileUploadResponse(BaseModel):
     status: str
     filename: str
     message: str
@@ -39,19 +41,44 @@ class SystemStatusResponse(BaseModel):
     mode: str
     model: str
 
-async def initialize_rag_system():
+class SystemInfoResponse(BaseModel):
+    rag_initialized: bool
+    total_files: int
+    system_status: str
+    mode: str
+    model: str
+    supported_formats: Dict
+    index_stats: Dict
+    system_capabilities: List[str]
+
+async def initialize_rag_system(incremental: bool = False, specific_files: List[str] = None):
     """Initialize RAG system on startup - Versión optimizada"""
     global rag_initialized
     try:
         print("🚀 Inicializando sistema RAG optimizado...")
-        documents = doc_processor.load_and_chunk_documents()
+        
+        if incremental and specific_files:
+            print(f"🔄 Indexación incremental para {len(specific_files)} archivos...")
+            documents, failed_files = doc_processor.load_and_chunk_documents(specific_files)
+        else:
+            documents, failed_files = doc_processor.load_and_chunk_documents()
         
         if documents:
-            rag_engine.initialize_vector_store(documents)
+            rag_engine.initialize_vector_store(documents, incremental=incremental)
             rag_initialized = rag_engine.is_rag_initialized()
             
             if rag_initialized:
-                print(f"✅ RAG inicializado con {len(documents)} documentos")
+                # Actualizar estado de indexación
+                if incremental and specific_files:
+                    rag_engine.incremental_indexer.mark_files_as_indexed(
+                        specific_files, 
+                        len(documents),
+                        file_manager.metadata["files"]
+                    )
+                print(f"✅ RAG inicializado con {len(documents)} chunks")
+                
+                if failed_files:
+                    print(f"⚠️ Archivos fallidos: {failed_files}")
             else:
                 print("⚠️ RAG no inicializado, modo simple activado")
         else:
@@ -63,10 +90,19 @@ async def initialize_rag_system():
         print("🔄 Continuando en modo simple...")
         rag_initialized = False
 
+# ✅ REEMPLAZAR EL EVENTO OBSOLETO CON LIFESPAN
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Lifespan context manager para reemplazar @app.on_event"""
     # Startup
-    await initialize_rag_system()
+    await initialize_rag_system(incremental=True)
+    
+    # Print registered routes for debugging
+    print("🛣️  Endpoints registrados:")
+    for route in app.routes:
+        if hasattr(route, 'methods') and hasattr(route, 'path'):
+            print(f"  {list(route.methods)} {route.path}")
+    
     yield
     # Shutdown (puedes añadir lógica de limpieza aquí si es necesario)
     print("🔴 Apagando servidor...")
@@ -78,17 +114,17 @@ rag_engine = HybridRAGEngine()
 
 # ✅ USAR LIFESPAN EN LUGAR DE on_event
 app = FastAPI(
-    title="Chatbot RAG Optimizado", 
-    version="6.0.0",
-    lifespan=lifespan  # Esto reemplaza @app.on_event("startup")
+    title="Chatbot RAG Avanzado", 
+    version="7.0.0",
+    lifespan=lifespan
 )
 
 # CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Your React frontend
+    allow_origins=["http://localhost:3000"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods, including DELETE
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -97,13 +133,30 @@ async def chat_endpoint(request: ChatRequest):
     start_time = time.time()
     
     try:
-        # Lógica optimizada de decisión
+        # Inicializar variables para evitar el error de variable no asociada
+        response = ""
+        used_rag = False
+        mode = "unknown"
+        intent_info = None
+        
+        # Lógica optimizada de decisión con detección de intención
         if request.use_rag is None:
             # Modo automático inteligente
             if rag_initialized:
-                response = rag_engine.query_with_rag(request.message)
-                used_rag = rag_engine._should_use_rag(request.message)[0]
-                mode = "auto_rag" if used_rag else "auto_simple"
+                should_use_rag, intent_data = rag_engine.intent_detector.should_use_rag(request.message)
+                intent_info = intent_data
+                
+                if should_use_rag:
+                    response = rag_engine.query_with_rag(
+                        request.message, 
+                        metadata_filters=request.metadata_filters
+                    )
+                    used_rag = True
+                    mode = "auto_rag"
+                else:
+                    response = rag_engine._generate_fast_response(request.message)
+                    used_rag = False
+                    mode = "auto_simple"
             else:
                 # Fallback a modo simple si RAG no está disponible
                 response = rag_engine._generate_fast_response(request.message)
@@ -112,13 +165,15 @@ async def chat_endpoint(request: ChatRequest):
         
         elif request.use_rag and rag_initialized:
             # RAG forzado (solo si está disponible)
-            response = rag_engine.query_with_rag(request.message)
+            response = rag_engine.query_with_rag(
+                request.message, 
+                metadata_filters=request.metadata_filters
+            )
             used_rag = True
             mode = "forced_rag"
         
         elif request.use_rag and not rag_initialized:
             # RAG solicitado pero no disponible
-            response = "⚠️ El sistema RAG no está disponible actualmente. Respondiendo en modo simple.\n\n"
             response += rag_engine._generate_fast_response(request.message)
             used_rag = False
             mode = "fallback"
@@ -136,12 +191,14 @@ async def chat_endpoint(request: ChatRequest):
             used_rag=used_rag,
             source="rag" if used_rag else "simple",
             mode=mode,
-            response_time=round(response_time, 2)
+            response_time=round(response_time, 2),
+            intent_info=intent_info
         )
         
     except Exception as e:
         response_time = time.time() - start_time
         error_msg = f"⚠️ Error: {str(e)}"
+        print(f"❌ Error en chat endpoint: {str(e)}")
         return ChatResponse(
             reply=error_msg,
             used_rag=False,
@@ -154,12 +211,14 @@ async def chat_endpoint(request: ChatRequest):
 async def upload_file(file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
     try:
         # Validar tipo de archivo
-        allowed_types = ['.pdf', '.txt', '.docx', '.doc']
+        allowed_types = ['.pdf', '.txt', '.docx', '.doc', '.pptx', '.ppt', '.xlsx', '.xls', '.csv']
         file_ext = os.path.splitext(file.filename)[1].lower()
         
         if file_ext not in allowed_types:
-            raise HTTPException(status_code=400, 
-                              detail=f"Tipo de archivo no soportado. Permitidos: {allowed_types}")
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Tipo de archivo no soportado. Permitidos: {allowed_types}"
+            )
         
         # Upload file
         result = await file_manager.upload_file(file)
@@ -171,8 +230,8 @@ async def upload_file(file: UploadFile = File(...), background_tasks: Background
                 message="El archivo ya existe en el sistema"
             )
         
-        # Reinitialize RAG con new files
-        background_tasks.add_task(initialize_rag_system)
+        # Reinitialize RAG con new files (incremental)
+        background_tasks.add_task(initialize_rag_system, True, [file.filename])
         
         return FileUploadResponse(
             status="success",
@@ -181,6 +240,7 @@ async def upload_file(file: UploadFile = File(...), background_tasks: Background
         )
         
     except Exception as e:
+        print(f"❌ Error subiendo archivo: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/files/{filename}")
@@ -194,15 +254,24 @@ async def delete_file(filename: str, background_tasks: BackgroundTasks = None):
         if not success:
             raise HTTPException(status_code=404, detail="Archivo no encontrado")
         
-        # Reinitialize RAG after deletion
-        background_tasks.add_task(initialize_rag_system)
+        # Remove from index and reinitialize RAG
+        rag_engine.incremental_indexer.remove_file_from_index(filename)
+        background_tasks.add_task(initialize_rag_system, True)
         
-        return {"message": f"Archivo {filename} eliminado exitosamente. Sistema RAG se está actualizando."}
+        return {
+            "status": "success",
+            "message": f"Archivo {filename} eliminado exitosamente",
+            "rag_update": "Sistema RAG se está actualizando"
+        }
+        
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Error deleting file {filename}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
+        print(f"❌ Error eliminando archivo {filename}: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error interno del servidor: {str(e)}"
+        )
 
 @app.get("/files")
 async def list_files():
@@ -211,53 +280,124 @@ async def list_files():
         files = file_manager.list_files()
         return {
             "files": files,
-            "total_count": file_manager.get_file_count()
+            "total_count": file_manager.get_file_count(),
+            "status": "success"
         }
     except Exception as e:
+        print(f"❌ Error listando archivos: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/rag/status")
 async def rag_status():
-    """RAG status endpoint that frontend expects"""
-    return {
-        "rag_initialized": rag_initialized,
-        "file_count": file_manager.get_file_count()
-    }
+    """RAG status endpoint que el frontend espera"""
+    try:
+        return {
+            "rag_initialized": rag_initialized,
+            "file_count": file_manager.get_file_count(),
+            "status": "initialized" if rag_initialized else "not_initialized",
+            "system_mode": "hybrid" if rag_initialized else "simple"
+        }
+    except Exception as e:
+        print(f"❌ Error en rag/status: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/rag/reinitialize")
 async def reinitialize_rag(background_tasks: BackgroundTasks = None):
-    """Reinitialize RAG endpoint that frontend expects"""
-    background_tasks.add_task(initialize_rag_system)
-    return {"message": "Reinicialización del sistema RAG iniciada"}
+    """Reinitialize RAG endpoint que el frontend espera"""
+    try:
+        background_tasks.add_task(initialize_rag_system, False)
+        return {
+            "status": "success",
+            "message": "Reinicialización del sistema RAG iniciada"
+        }
+    except Exception as e:
+        print(f"❌ Error reinicializando RAG: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/initialize-rag")
 async def initialize_rag_legacy(background_tasks: BackgroundTasks = None):
-    """Legacy initialize endpoint for frontend compatibility"""
-    background_tasks.add_task(initialize_rag_system)
-    return {"message": "Inicialización del sistema RAG iniciada"}
+    """Legacy initialize endpoint para compatibilidad con frontend"""
+    try:
+        background_tasks.add_task(initialize_rag_system, False)
+        return {
+            "status": "success", 
+            "message": "Inicialización del sistema RAG iniciada"
+        }
+    except Exception as e:
+        print(f"❌ Error en initialize-rag: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/system/status", response_model=SystemStatusResponse)
 async def system_status():
     """Get comprehensive system status"""
-    rag_stats = rag_engine.get_rag_stats()
-    
-    return SystemStatusResponse(
-        rag_initialized=rag_initialized,
-        total_files=file_manager.get_file_count(),
-        system_status="healthy" if rag_initialized else "simple_mode",
-        mode=rag_stats.get("mode", "simple"),
-        model="llama3.1:8b-instruct-q4_K_M"
-    )
+    try:
+        rag_stats = rag_engine.get_rag_stats()
+        
+        return SystemStatusResponse(
+            rag_initialized=rag_initialized,
+            total_files=file_manager.get_file_count(),
+            system_status="healthy" if rag_initialized else "simple_mode",
+            mode=rag_stats.get("mode", "simple"),
+            model="llama3.1:8b-instruct-q4_K_M"
+        )
+    except Exception as e:
+        print(f"❌ Error en system/status: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/system/info", response_model=SystemInfoResponse)
+async def system_info():
+    """Obtener información completa del sistema"""
+    try:
+        system_info_data = rag_engine.get_system_info()
+        
+        return SystemInfoResponse(
+            rag_initialized=rag_initialized,
+            total_files=file_manager.get_file_count(),
+            system_status="healthy" if rag_initialized else "simple_mode",
+            mode=system_info_data.get("mode", "hybrid"),
+            model="llama3.1:8b-instruct-q4_K_M",
+            supported_formats=doc_processor.get_supported_formats(),
+            index_stats=rag_engine.incremental_indexer.get_index_stats(),
+            system_capabilities=[
+                "incremental_indexing",
+                "metadata_search", 
+                "advanced_intent_detection",
+                "multi_format_support"
+            ]
+        )
+    except Exception as e:
+        print(f"❌ Error en system/info: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/search/filters")
+async def get_search_filters():
+    """Obtener filtros de búsqueda disponibles"""
+    try:
+        if rag_engine.metadata_search:
+            return {
+                "status": "success",
+                "filters": rag_engine.metadata_search.get_available_filters()
+            }
+        return {
+            "status": "success",
+            "filters": {}
+        }
+    except Exception as e:
+        print(f"❌ Error en search/filters: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
 async def root():
     return {
-        "message": "🚀 Chatbot RAG Optimizado - Modo Quantizado",
+        "message": "🚀 Chatbot RAG Avanzado - Sistema Mejorado",
         "status": "operational",
         "rag_initialized": rag_initialized,
         "file_count": file_manager.get_file_count(),
         "model": "llama3.1:8b-instruct-q4_K_M",
-        "optimizations": ["quantized_model", "fast_fallback", "auto_rag_detection"]
+        "endpoints_available": [
+            "/chat", "/upload", "/files", "/rag/status", 
+            "/system/status", "/system/info", "/search/filters"
+        ]
     }
 
 if __name__ == "__main__":

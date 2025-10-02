@@ -14,3 +14,4 @@ langchain-cli
 rank_bm25
 unstructured
 langchain-ollama
+rank_bm25
