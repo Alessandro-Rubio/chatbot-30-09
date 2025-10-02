@@ -63,10 +63,8 @@ async def initialize_rag_system():
         print("🔄 Continuando en modo simple...")
         rag_initialized = False
 
-# ✅ REEMPLAZAR EL EVENTO OBSOLETO CON LIFESPAN
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan context manager para reemplazar @app.on_event"""
     # Startup
     await initialize_rag_system()
     yield
